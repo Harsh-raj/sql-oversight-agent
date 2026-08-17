@@ -1,0 +1,7 @@
+langgraph
+ollama
+qdrant-client
+pydantic
+pytest
+python-dotenv
+sqlparse
