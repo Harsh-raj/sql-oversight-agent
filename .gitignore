@@ -217,3 +217,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .DS_Store
+data/marketplace.db
+data/eval_log.jsonl
