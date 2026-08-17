@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+<<<<<<< HEAD
+=======
+.DS_Store
+data/marketplace.db
+data/eval_log.jsonl
+>>>>>>> 24e7284 (add .gitignore entries)
