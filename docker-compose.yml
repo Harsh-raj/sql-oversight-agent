@@ -1,0 +1,18 @@
+# Ollama is intentionally NOT containerized here — running it natively on
+# the host gives noticeably better CPU inference performance than running
+# it inside Docker Desktop's VM layer on Windows. Install it separately
+# (https://ollama.com) and run `ollama pull qwen2.5-coder:7b`.
+#
+# SQLite needs no service — it's a single file at ./data/marketplace.db.
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.12.1
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  qdrant_data:
