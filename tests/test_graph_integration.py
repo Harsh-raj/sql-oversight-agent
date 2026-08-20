@@ -41,6 +41,8 @@ def make_fake_chat(plan_text: str, sql_by_call: list, clarity_response: dict = C
             return {"message": {"content": plan_text}}
         if "check whether a business question" in system:
             return clarity_response
+        if "actually answers the business question" in system:
+            return {"message": {"content": "VALID"}}
 
         # sql generation call
         response = sql_by_call[state["n"]]
@@ -136,7 +138,12 @@ def test_retries_exhausted_escalates():
             "SELECT COUNT(*) FROM zzz_totally_unknown_table_zzz",
         ],
     )
-    final_state = run_graph("How many Design courses?", fake_chat)
+    # After retries exhaust, escalate now offers the developer a chance
+    # to resolve it live (ADR-0006) — "n" declines, matching this test's
+    # intent of verifying the give-up path specifically.
+    final_state = run_graph(
+        "How many Design courses?", fake_chat, input_responses=["n"]
+    )
 
     assert final_state.get("escalated") is True
     assert "step 1 of 1" in final_state["final_answer"]
@@ -159,7 +166,8 @@ def test_multi_step_one_step_fails_escalates_whole_run_with_partial_context():
         ],
     )
     final_state = run_graph(
-        "Compare Design and Atlantis course counts", fake_chat
+        "Compare Design and Atlantis course counts", fake_chat,
+        input_responses=["n"],  # decline the human-resolution offer (ADR-0006)
     )
 
     assert final_state.get("escalated") is True
@@ -198,8 +206,11 @@ def test_identifier_correction_rejected_escalates():
             "SELECT COUNT(*) FROM Courses WHERE category = 'Design'",
         ],
     )
+    # First "n" rejects the identifier correction at confirm_correction;
+    # second "n" declines the human-resolution offer that escalate now
+    # makes (ADR-0006) — both are needed to reach a final escalation.
     final_state = run_graph(
-        "How many Design courses?", fake_chat, input_responses=["n"]
+        "How many Design courses?", fake_chat, input_responses=["n", "n"]
     )
 
     assert final_state.get("escalated") is True
@@ -256,3 +267,187 @@ def test_clarification_skipped_logs_assumption_and_proceeds():
         a.get("description", "") for a in final_state["assumptions"]
     ]
     assert any("did not answer" in d for d in assumption_descriptions)
+
+
+# ---- Scenario 10: human rescues an escalation, plan completes -----------
+
+def test_human_provided_query_rescues_escalation_and_completes_plan():
+    fake_chat = make_fake_chat(
+        plan_text="- How many courses are in the Design category?",
+        sql_by_call=[
+            # every model attempt is broken beyond fuzzy-match repair
+            "SELECT COUNT(*) FROM zzz_totally_unknown_table_zzz",
+            "SELECT COUNT(*) FROM zzz_totally_unknown_table_zzz",
+            "SELECT COUNT(*) FROM zzz_totally_unknown_table_zzz",
+        ],
+    )
+    final_state = run_graph(
+        "How many Design courses?",
+        fake_chat,
+        input_responses=[
+            "y",  # yes, developer knows the correct SQL
+            "SELECT COUNT(*) FROM course_listings WHERE category = 'Design'",
+        ],
+    )
+
+    assert not final_state.get("escalated")
+    assert final_state["step_results"][0]["source"] == "human"
+    assert final_state["step_results"][0]["sql_result"][0]["COUNT(*)"] == 1189
+    assert "(human-provided query)" in final_state["final_answer"]
+
+
+# ---- Scenario 11: human's own query also fails, escalates for good ------
+
+def test_human_provided_query_also_fails_escalates_after_max_attempts():
+    fake_chat = make_fake_chat(
+        plan_text="- How many courses are in the Design category?",
+        sql_by_call=[
+            "SELECT COUNT(*) FROM zzz_totally_unknown_table_zzz",
+            "SELECT COUNT(*) FROM zzz_totally_unknown_table_zzz",
+            "SELECT COUNT(*) FROM zzz_totally_unknown_table_zzz",
+        ],
+    )
+    final_state = run_graph(
+        "How many Design courses?",
+        fake_chat,
+        input_responses=[
+            "y", "SELECT COUNT(*) FROM also_wrong_table",
+            "y", "SELECT COUNT(*) FROM still_wrong_table",
+        ],
+    )
+
+    assert final_state.get("escalated") is True
+
+
+# ---- Scenario 12: fast path genuinely skips clarification+planner LLM calls (ADR-0007)
+
+def test_fast_path_skips_clarification_and_planner_llm_calls():
+    """Proves the fast path isn't just a flag — clarification and planner
+    system prompts must never be sent to the model at all for a simple
+    question. If either fires, this test fails immediately rather than
+    silently succeeding."""
+    calls_made = []
+
+    def fake_chat(model, messages, options=None):
+        system = messages[0]["content"].lower()
+        if "break a business question" in system:
+            calls_made.append("planner")
+            raise AssertionError(
+                "Planner should have been skipped (fast path)")
+        if "check whether a business question" in system:
+            calls_made.append("clarification")
+            raise AssertionError(
+                "Clarification should have been skipped (fast path)")
+        if "actually answers the business question" in system:
+            calls_made.append("semantic_critic")
+            return {"message": {"content": "VALID"}}
+        calls_made.append("sql_generator")
+        return {
+            "message": {
+                "content": "SELECT COUNT(*) FROM course_listings WHERE category = 'Design'"
+            }
+        }
+
+    final_state = run_graph("How many Design courses?", fake_chat)
+
+    assert calls_made == ["sql_generator", "semantic_critic"]
+    assert final_state["fast_path"] is True
+    assert not final_state.get("escalated")
+    assert final_state["step_results"][0]["sql_result"][0]["COUNT(*)"] == 1189
+
+
+def test_non_simple_question_still_uses_full_path():
+    fake_chat = make_fake_chat(
+        plan_text=(
+            "- How many courses are in the Design category?\n"
+            "- How many courses are in the Health category?"
+        ),
+        sql_by_call=[
+            "SELECT COUNT(*) FROM course_listings WHERE category = 'Design'",
+            "SELECT COUNT(*) FROM course_listings WHERE category = 'Health'",
+        ],
+    )
+    final_state = run_graph(
+        "Compare Design and Health course counts", fake_chat)
+
+    assert final_state["fast_path"] is False
+    assert len(final_state["step_results"]) == 2
+
+
+# ---- Scenario 13: semantic critic catches a mechanically-valid but wrong
+#      result, retry produces the correct one (ADR-0011, Stage 3) --------
+
+def test_semantic_critic_catches_wrong_direction_then_retry_succeeds():
+    """The mechanical critic would accept this query — it runs cleanly
+    and returns a non-empty row. Only the semantic critic can catch that
+    it answers 'lowest' instead of 'highest'."""
+    call_log = []
+
+    def fake_chat(model, messages, options=None):
+        system = messages[0]["content"].lower()
+        if "break a business question" in system:
+            return {
+                "message": {
+                    "content": "- Which category has the highest average price?"
+                }
+            }
+        if "check whether a business question" in system:
+            return {"message": {"content": "CLEAR"}}
+        if "actually answers the business question" in system:
+            call_log.append("semantic_critic")
+            user_content = messages[1]["content"]
+            if "MIN(" in user_content:
+                return {
+                    "message": {
+                        "content": "INVALID: used MIN instead of MAX for a 'highest' question"
+                    }
+                }
+            return {"message": {"content": "VALID"}}
+
+        call_log.append("sql_generator")
+        if len(call_log) == 1:
+            # first attempt: mechanically fine, semantically wrong
+            return {
+                "message": {
+                    "content": "SELECT category, MIN(price_usd) AS p FROM course_listings GROUP BY category ORDER BY p DESC LIMIT 1"
+                }
+            }
+        return {
+            "message": {
+                "content": "SELECT category, AVG(price_usd) AS p FROM course_listings GROUP BY category ORDER BY p DESC LIMIT 1"
+            }
+        }
+
+    final_state = run_graph(
+        "Which category has the highest average price?", fake_chat
+    )
+
+    assert not final_state.get("escalated")
+    assert "AVG(" in final_state["step_results"][0]["sql_query"]
+    assert final_state["step_results"][0]["sql_result"][0]["category"] == "Technology"
+
+
+def test_semantic_critic_persistent_rejection_escalates():
+    fake_chat_calls = {"n": 0}
+
+    def fake_chat(model, messages, options=None):
+        system = messages[0]["content"].lower()
+        if "break a business question" in system:
+            return {"message": {"content": "- Which category is highest?"}}
+        if "check whether a business question" in system:
+            return {"message": {"content": "CLEAR"}}
+        if "actually answers the business question" in system:
+            return {"message": {"content": "INVALID: still wrong"}}
+        fake_chat_calls["n"] += 1
+        return {
+            "message": {
+                "content": "SELECT category FROM course_listings ORDER BY price_usd LIMIT 1"
+            }
+        }
+
+    final_state = run_graph(
+        "Which category is highest?", fake_chat, input_responses=["n"]
+    )
+
+    assert final_state.get("escalated") is True
+    assert "Semantic critic" in final_state["escalation_reason"]

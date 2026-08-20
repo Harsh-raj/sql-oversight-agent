@@ -11,7 +11,7 @@ other projects:
 
 import json
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -53,7 +53,8 @@ def test_routing_escalates_after_max_retries():
 
 
 def test_routing_advances_when_valid_and_no_correction_pending():
-    state = {"is_valid": True, "generation_attempt": 0, "pending_correction": None}
+    state = {"is_valid": True, "generation_attempt": 0,
+             "pending_correction": None}
     assert should_retry_or_escalate(state) == "advance"
 
 
@@ -83,7 +84,8 @@ def test_clarity_check_proceeds_when_clear():
     with patch(
         "src.nodes.clarification._check_ambiguity", return_value="CLEAR"
     ):
-        state = {"question": "How many courses in Design?", "schema_context": "..."}
+        state = {"question": "How many courses in Design?",
+                 "schema_context": "..."}
         result = check_clarity(state)
 
     assert result["clarification_needed"] is False
@@ -96,7 +98,8 @@ def test_clarity_check_asks_and_augments_question_when_ambiguous():
         "src.nodes.clarification._check_ambiguity",
         return_value="CLARIFY: Do you mean by enrollment or by price?",
     ), patch("builtins.input", return_value="By enrollment"):
-        state = {"question": "Which category is most popular?", "schema_context": "..."}
+        state = {"question": "Which category is most popular?",
+                 "schema_context": "..."}
         result = check_clarity(state)
 
     assert result["clarification_needed"] is True
@@ -111,7 +114,8 @@ def test_clarity_check_proceeds_without_answer_if_developer_skips():
         "src.nodes.clarification._check_ambiguity",
         return_value="CLARIFY: Which time range?",
     ), patch("builtins.input", return_value=""):
-        state = {"question": "Recent trend in enrollments?", "schema_context": "..."}
+        state = {"question": "Recent trend in enrollments?",
+                 "schema_context": "..."}
         result = check_clarity(state)
 
     assert result["clarification_needed"] is True
@@ -202,7 +206,8 @@ def test_planner_parses_multiple_steps():
 
     raw = "- How many courses are in Design?\n- How many courses are in Health?"
     with patch("src.nodes.planner._generate_plan_text", return_value=raw):
-        state = {"question": "Compare Design and Health course counts", "schema_context": "..."}
+        state = {"question": "Compare Design and Health course counts",
+                 "schema_context": "..."}
         result = create_plan(state)
 
     assert result["plan"] == [
@@ -221,7 +226,8 @@ def test_planner_single_step_question_produces_one_item_plan():
         "src.nodes.planner._generate_plan_text",
         return_value="- How many courses are in Design?",
     ):
-        state = {"question": "How many courses are in Design?", "schema_context": "..."}
+        state = {"question": "How many courses are in Design?",
+                 "schema_context": "..."}
         result = create_plan(state)
 
     assert len(result["plan"]) == 1
@@ -234,10 +240,31 @@ def test_planner_falls_back_to_single_step_on_malformed_output():
         "src.nodes.planner._generate_plan_text",
         return_value="I think this question is about courses.",
     ):
-        state = {"question": "How many courses are in Design?", "schema_context": "..."}
+        state = {"question": "How many courses are in Design?",
+                 "schema_context": "..."}
         result = create_plan(state)
 
     assert result["plan"] == ["How many courses are in Design?"]
+
+
+def test_planner_falls_back_when_step_is_actually_sql():
+    """Real bug found in live testing: the model sometimes leaks the SQL
+    query itself as a plan step instead of a natural-language question,
+    which would otherwise show up as 'Step 1: SELECT COUNT(*) FROM...'
+    in the final answer."""
+    from src.nodes.planner import create_plan
+
+    with patch(
+        "src.nodes.planner._generate_plan_text",
+        return_value="- SELECT COUNT(*) FROM course_listings WHERE category = 'Design';",
+    ):
+        state = {
+            "question": "How many courses are in the Design category?",
+            "schema_context": "...",
+        }
+        result = create_plan(state)
+
+    assert result["plan"] == ["How many courses are in the Design category?"]
 
 
 # ---- Unit tests: advance_step (ADR-0003) --------------------------------
@@ -330,7 +357,8 @@ def test_retry_feedback_names_the_bad_column_explicitly():
 def test_retry_feedback_falls_back_to_generic_for_unknown_errors():
     from src.nodes.sql_generator import _build_retry_feedback
 
-    feedback = _build_retry_feedback("syntax error near SELECT", "SELECT * FRO x")
+    feedback = _build_retry_feedback(
+        "syntax error near SELECT", "SELECT * FRO x")
     assert "syntax error near SELECT" in feedback
 
 
@@ -434,7 +462,7 @@ def test_confirm_correction_rejects_and_forces_invalid():
 def test_route_after_confirmation_advances_when_confirmed():
     from src.nodes.confirm_correction import route_after_confirmation
 
-    assert route_after_confirmation({"is_valid": True}) == "advance_step"
+    assert route_after_confirmation({"is_valid": True}) == "semantic_critic"
 
 
 def test_route_after_confirmation_escalates_when_rejected():
@@ -504,7 +532,8 @@ def test_extract_all_column_names_parses_single_table():
 def test_find_best_match_returns_confident_match():
     from src.nodes.identifier_validator import _find_best_match
 
-    assert _find_best_match("Courses", ["course_listings"]) == "course_listings"
+    assert _find_best_match(
+        "Courses", ["course_listings"]) == "course_listings"
 
 
 def test_find_best_match_returns_none_below_threshold():
@@ -612,6 +641,141 @@ def test_validate_identifiers_does_not_flag_count_as_a_column():
     assert result.get("pending_correction") is None
 
 
+# ---- Unit tests: human-in-the-loop escalation (ADR-0006) ----------------
+
+def test_escalate_offers_resolution_and_captures_human_sql():
+    from src.nodes.escalation import escalate_to_human
+
+    state = {
+        "question": "How many Design courses?",
+        "plan": ["How many Design courses?"],
+        "current_step_index": 0,
+        "step_results": [],
+        "validation_reason": "Query error: no such table: courses",
+        "generation_attempt": 2,
+        "human_attempts": 0,
+    }
+    with patch(
+        "builtins.input",
+        side_effect=[
+            "y", "SELECT COUNT(*) FROM course_listings WHERE category='Design'"],
+    ):
+        result = escalate_to_human(state)
+
+    assert result["human_provided"] is True
+    assert result["human_wants_to_retry"] is True
+    assert result["human_attempts"] == 1
+    assert "course_listings" in result["sql_query"]
+
+
+def test_escalate_finalizes_and_persists_when_developer_declines(tmp_path):
+    from src.nodes import escalation as escalation_module
+
+    queue_path = tmp_path / "escalation_queue.jsonl"
+    state = {
+        "question": "How many Design courses?",
+        "plan": ["How many Design courses?"],
+        "current_step_index": 0,
+        "step_results": [],
+        "validation_reason": "Query error: no such table: courses",
+        "generation_attempt": 2,
+        "human_attempts": 0,
+    }
+    with patch.object(
+        escalation_module, "ESCALATION_QUEUE_PATH", queue_path
+    ), patch("builtins.input", return_value="n"):
+        result = escalation_module.escalate_to_human(state)
+
+    assert result["escalated"] is True
+    assert result["human_wants_to_retry"] is False
+    assert queue_path.exists()
+    record = json.loads(queue_path.read_text().strip().splitlines()[0])
+    assert record["resolved"] is False
+    assert record["question"] == "How many Design courses?"
+
+
+def test_escalate_stops_after_max_human_attempts_without_asking_again(tmp_path):
+    from src.nodes import escalation as escalation_module
+
+    queue_path = tmp_path / "escalation_queue.jsonl"
+    state = {
+        "question": "How many Design courses?",
+        "plan": ["How many Design courses?"],
+        "current_step_index": 0,
+        "step_results": [],
+        "validation_reason": "still failing",
+        "generation_attempt": 2,
+        "human_attempts": 2,  # already at MAX_HUMAN_ATTEMPTS
+    }
+    with patch.object(escalation_module, "ESCALATION_QUEUE_PATH", queue_path):
+        # note: no input() mock provided at all — if the code tried to
+        # prompt again, this test would raise StopIteration/error
+        result = escalation_module.escalate_to_human(state)
+
+    assert result["escalated"] is True
+
+
+def test_route_after_escalation_goes_to_validator_when_retrying():
+    from src.nodes.escalation import route_after_escalation
+
+    assert route_after_escalation(
+        {"human_wants_to_retry": True}) == "identifier_validator"
+
+
+def test_route_after_escalation_ends_when_not_retrying():
+    from src.nodes.escalation import route_after_escalation
+
+    assert route_after_escalation({"human_wants_to_retry": False}) == "end"
+
+
+def test_routing_sends_failed_human_query_back_to_escalate_not_retry():
+    from src.nodes.critic import should_retry_or_escalate
+
+    state = {
+        "is_valid": False,
+        "human_provided": True,
+        "generation_attempt": 1,  # would normally still have retries left
+    }
+    assert should_retry_or_escalate(state) == "escalate"
+
+
+def test_advance_step_tracks_human_source():
+    from src.nodes.advance_step import advance_step
+
+    state = {
+        "plan": ["How many Design courses?"],
+        "current_step_index": 0,
+        "step_results": [],
+        "sql_query": "SELECT COUNT(*) FROM course_listings",
+        "sql_result": [{"count": 1189}],
+        "generation_attempt": 0,
+        "human_provided": True,
+    }
+    result = advance_step(state)
+
+    assert result["step_results"][0]["source"] == "human"
+    assert result["human_provided"] is False  # reset for next step
+
+
+def test_respond_labels_human_provided_steps():
+    from src.nodes.responder import respond
+
+    state = {
+        "question": "How many Design courses?",
+        "step_results": [
+            {
+                "sub_question": "How many Design courses?",
+                "sql_query": "SELECT COUNT(*) FROM course_listings",
+                "sql_result": [{"count": 1189}],
+                "source": "human",
+            }
+        ],
+        "assumptions": [],
+    }
+    result = respond(state)
+    assert "(human-provided query)" in result["final_answer"]
+
+
 # ---- Integration test (requires seeded DB + running Ollama) -----------
 
 @pytest.mark.integration
@@ -632,3 +796,540 @@ def test_full_graph_answers_simple_question():
     assert final_state.get("escalated") in (True, None) or final_state.get(
         "sql_result"
     ) is not None
+
+
+# ---- Unit tests: fast_path heuristic gate (ADR-0007) ---------------------
+
+def test_fast_path_fires_for_short_simple_question():
+    from src.nodes.fast_path import check_fast_path
+
+    state = {"question": "How many Design courses are there?"}
+    result = check_fast_path(state)
+
+    assert result["fast_path"] is True
+    assert result["plan"] == ["How many Design courses are there?"]
+    assert result["clarification_needed"] is False
+
+
+def test_fast_path_skips_for_comparison_question():
+    from src.nodes.fast_path import check_fast_path
+
+    state = {"question": "Compare Design and Health course counts"}
+    result = check_fast_path(state)
+
+    assert result["fast_path"] is False
+    assert "plan" not in result
+
+
+def test_fast_path_skips_for_long_question():
+    from src.nodes.fast_path import check_fast_path
+
+    long_question = " ".join(["word"] * 20) + "?"
+    result = check_fast_path({"question": long_question})
+
+    assert result["fast_path"] is False
+
+
+def test_fast_path_skips_for_multiple_question_marks():
+    from src.nodes.fast_path import check_fast_path
+
+    state = {"question": "How many Design courses? What about Health?"}
+    result = check_fast_path(state)
+
+    assert result["fast_path"] is False
+
+
+def test_fast_path_skips_for_vague_temporal_language():
+    """Real bug found via testing: a short question containing vague
+    language ('recently') was originally fast-pathed despite being
+    exactly the kind of ambiguity ADR-0002's clarification node exists
+    to catch — this would have silently bypassed that safety net."""
+    from src.nodes.fast_path import check_fast_path
+
+    result = check_fast_path(
+        {"question": "How many courses were added recently?"}
+    )
+    assert result["fast_path"] is False
+
+
+def test_route_after_fast_path_check_goes_direct_when_fast():
+    from src.nodes.fast_path import route_after_fast_path_check
+
+    assert route_after_fast_path_check({"fast_path": True}) == "sql_generator"
+
+
+def test_route_after_fast_path_check_goes_to_clarification_when_not_fast():
+    from src.nodes.fast_path import route_after_fast_path_check
+
+    assert route_after_fast_path_check({"fast_path": False}) == "clarification"
+
+
+# ---- Unit tests: correction memory (ADR-0008) ----------------------------
+
+def test_correction_store_degrades_gracefully_when_qdrant_unavailable():
+    from src.memory.correction_store import CorrectionStore
+
+    with patch("src.memory.correction_store.QdrantClient", side_effect=Exception("refused")):
+        store = CorrectionStore()
+
+    assert store.client is None
+    assert store.retrieve_similar("any question") == []
+    assert store.store_correction("q", "sql", None, "correction") is False
+
+
+def test_correction_store_retrieve_similar_formats_results():
+    from src.memory.correction_store import CorrectionStore
+
+    store = CorrectionStore.__new__(CorrectionStore)  # bypass __init__
+    store.collection = "test_collection"
+    store.client = MagicMock()
+    store.client.get_collections.return_value = MagicMock(
+        collections=[MagicMock(name="test_collection")]
+    )
+
+    fake_hit = MagicMock()
+    fake_hit.score = 0.92
+    fake_hit.payload = {
+        "question": "How many Design courses?",
+        "attempted_sql": "SELECT * FROM courses",
+        "error": None,
+        "human_correction": "Use course_listings, not courses",
+    }
+    store.client.search.return_value = [fake_hit]
+
+    with patch("ollama.embeddings", return_value={"embedding": [0.1] * 384}):
+        results = store.retrieve_similar("How many Design courses are there?")
+
+    assert len(results) == 1
+    assert results[0]["score"] == 0.92
+    assert results[0]["human_correction"] == "Use course_listings, not courses"
+
+
+def test_correction_store_store_correction_upserts_point():
+    from src.memory.correction_store import CorrectionStore
+
+    store = CorrectionStore.__new__(CorrectionStore)
+    store.collection = "test_collection"
+    store.client = MagicMock()
+    store.client.get_collections.return_value = MagicMock(collections=[])
+
+    with patch("ollama.embeddings", return_value={"embedding": [0.1] * 384}):
+        result = store.store_correction(
+            question="How many Design courses?",
+            attempted_sql="SELECT * FROM courses",
+            error="no such table: courses",
+            human_correction="Use course_listings",
+        )
+
+    assert result is True
+    store.client.upsert.assert_called_once()
+
+
+# ---- Unit tests: memory wiring in sql_generator (ADR-0008) ---------------
+
+def test_format_memory_context_includes_results_above_threshold():
+    from src.nodes.sql_generator import _format_memory_context
+    from src.config import settings
+
+    similar = [
+        {
+            "score": settings.retrieval_similarity_threshold + 0.1,
+            "question": "How many Design courses?",
+            "attempted_sql": "SELECT * FROM courses",
+            "human_correction": "Use course_listings",
+        }
+    ]
+    context = _format_memory_context(similar)
+    assert "Use course_listings" in context
+
+
+def test_format_memory_context_excludes_low_similarity_results():
+    from src.nodes.sql_generator import _format_memory_context
+    from src.config import settings
+
+    similar = [
+        {
+            "score": settings.retrieval_similarity_threshold - 0.3,
+            "question": "unrelated question",
+            "attempted_sql": None,
+            "human_correction": "irrelevant correction",
+        }
+    ]
+    context = _format_memory_context(similar)
+    assert context == ""
+
+
+def test_generate_sql_queries_memory_only_on_first_attempt():
+    from src.nodes.sql_generator import generate_sql
+
+    with patch("ollama.chat", return_value={"message": {"content": "SELECT 1"}}), \
+            patch("src.nodes.sql_generator.CorrectionStore") as MockStore:
+        MockStore.return_value.retrieve_similar.return_value = []
+
+        state_first_attempt = {
+            "plan": ["q"], "current_step_index": 0,
+            "schema_context": "Table `t`: c (TEXT)",
+            "question": "q", "generation_attempt": 0,
+        }
+        generate_sql(state_first_attempt)
+        assert MockStore.return_value.retrieve_similar.called
+
+        MockStore.reset_mock()
+        state_retry = {
+            "plan": ["q"], "current_step_index": 0,
+            "schema_context": "Table `t`: c (TEXT)",
+            "question": "q", "generation_attempt": 1,
+            "sql_error": "some error", "sql_query": "SELECT bad",
+        }
+        generate_sql(state_retry)
+        assert not MockStore.return_value.retrieve_similar.called
+
+
+# ---- Unit tests: feedback wiring + the sql_query/sql_result bug fix -----
+
+def test_capture_human_feedback_reads_from_step_results_not_stale_top_level(tmp_path):
+    """Regression test for a real bug found while wiring memory: advance_step
+    resets top-level sql_query/sql_result to None even on the last step, so
+    capture_human_feedback must read from step_results instead."""
+    from src.feedback import capture_human_feedback
+
+    log_path = tmp_path / "eval_log.jsonl"
+    state = {
+        "question": "How many Design courses?",
+        "sql_query": None,  # stale, reset by advance_step — must NOT be used
+        "sql_result": None,
+        "step_results": [
+            {
+                "sub_question": "How many Design courses?",
+                "sql_query": "SELECT COUNT(*) FROM course_listings WHERE category='Design'",
+                "sql_result": [{"count": 1189}],
+            }
+        ],
+    }
+    with patch("src.feedback.EVAL_LOG_PATH", log_path), patch(
+        "builtins.input", return_value="y"
+    ):
+        record = capture_human_feedback(state)
+
+    assert "course_listings" in record["sql_query"]
+    assert record["sql_result"] == [{"count": 1189}]
+
+
+def test_capture_human_feedback_stores_correction_in_memory_when_incorrect(tmp_path):
+    from src.feedback import capture_human_feedback
+
+    log_path = tmp_path / "eval_log.jsonl"
+    state = {
+        "question": "How many Design courses?",
+        "step_results": [
+            {
+                "sub_question": "q",
+                "sql_query": "SELECT * FROM courses",
+                "sql_result": None,
+            }
+        ],
+    }
+    with patch("src.feedback.EVAL_LOG_PATH", log_path), patch(
+        "builtins.input", side_effect=["n", "Use course_listings instead"]
+    ), patch("src.feedback.CorrectionStore") as MockStore:
+        capture_human_feedback(state)
+
+    MockStore.return_value.store_correction.assert_called_once_with(
+        question="How many Design courses?",
+        attempted_sql="SELECT * FROM courses",
+        error=None,
+        human_correction="Use course_listings instead",
+    )
+
+
+def test_capture_human_feedback_does_not_store_memory_when_correct(tmp_path):
+    from src.feedback import capture_human_feedback
+
+    log_path = tmp_path / "eval_log.jsonl"
+    state = {
+        "question": "How many Design courses?",
+        "step_results": [{"sub_question": "q", "sql_query": "SELECT 1", "sql_result": [{"c": 1}]}],
+    }
+    with patch("src.feedback.EVAL_LOG_PATH", log_path), patch(
+        "builtins.input", return_value="y"
+    ), patch("src.feedback.CorrectionStore") as MockStore:
+        capture_human_feedback(state)
+
+    MockStore.return_value.store_correction.assert_not_called()
+
+
+# ---- Unit tests: tracing (ADR-0009) ---------------------------------------
+
+def test_tracing_disabled_by_default_returns_none():
+    from src import tracing
+
+    with patch.object(tracing.settings, "langfuse_enabled", False):
+        tracing._client = None
+        tracing._client_init_attempted = False
+        trace_id = tracing.create_run_trace_id("some-run-id")
+
+    assert trace_id is None
+
+
+def test_tracing_start_span_returns_none_when_trace_id_is_none():
+    from src import tracing
+
+    span = tracing.start_span(None, "some_node", {"question": "x"})
+    assert span is None
+
+
+def test_tracing_end_span_handles_none_span_without_error():
+    from src import tracing
+
+    tracing.end_span(None, {"result": "ok"})  # must not raise
+
+
+def test_tracing_degrades_gracefully_when_client_init_fails():
+    from src import tracing
+
+    tracing._client = None
+    tracing._client_init_attempted = False
+    with patch.object(tracing.settings, "langfuse_enabled", True), patch(
+        "langfuse.Langfuse", side_effect=Exception("connection refused")
+    ):
+        trace_id = tracing.create_run_trace_id("some-run-id")
+
+    assert trace_id is None
+    tracing._client = None
+    tracing._client_init_attempted = False
+
+
+def test_tracing_flush_never_raises_when_disabled():
+    from src import tracing
+
+    with patch.object(tracing.settings, "langfuse_enabled", False):
+        tracing.flush()  # must not raise
+
+
+def test_end_span_uses_update_then_end_not_end_with_output_kwarg():
+    """Real bug found via live testing (with genuinely unreachable
+    Langfuse credentials, not just mocks): span.end() does not accept an
+    output kwarg in the installed SDK version — output must be set via
+    span.update(output=...) first, then span.end() with no arguments."""
+    from src import tracing
+
+    mock_span = MagicMock()
+    tracing.end_span(mock_span, {"summary": "done"})
+
+    mock_span.update.assert_called_once_with(output={"summary": "done"})
+    mock_span.end.assert_called_once_with()
+
+
+# ---- Unit tests: trajectory evals (ADR-0009) ------------------------------
+
+def test_compute_trajectory_metrics_with_no_data_returns_zero_note(tmp_path):
+    from src.evals import compute_trajectory_metrics
+
+    metrics = compute_trajectory_metrics(
+        eval_log_path=tmp_path / "eval_log.jsonl",
+        escalation_queue_path=tmp_path / "escalation_queue.jsonl",
+    )
+    assert metrics["total_runs"] == 0
+    assert "note" in metrics
+
+
+def test_compute_trajectory_metrics_basic_rates(tmp_path):
+    from src.evals import compute_trajectory_metrics
+
+    eval_path = tmp_path / "eval_log.jsonl"
+    escalation_path = tmp_path / "escalation_queue.jsonl"
+
+    eval_records = [
+        {"human_verdict": "correct", "total_attempts": 1, "human_intervention": False},
+        {"human_verdict": "correct", "total_attempts": 2, "human_intervention": False},
+        {"human_verdict": "incorrect", "total_attempts": 1,
+            "human_intervention": False},
+    ]
+    with open(eval_path, "w") as f:
+        for r in eval_records:
+            f.write(json.dumps(r) + "\n")
+
+    escalation_records = [
+        {"total_attempts": 3, "human_intervention": True},
+    ]
+    with open(escalation_path, "w") as f:
+        for r in escalation_records:
+            f.write(json.dumps(r) + "\n")
+
+    metrics = compute_trajectory_metrics(
+        eval_log_path=eval_path, escalation_queue_path=escalation_path
+    )
+
+    assert metrics["total_runs"] == 4
+    assert metrics["answered_runs"] == 3
+    assert metrics["escalated_runs"] == 1
+    assert metrics["escalation_rate"] == 0.25
+    assert metrics["correct_count"] == 2
+    assert metrics["incorrect_count"] == 1
+    assert metrics["runs_needing_retry"] == 2  # attempts of 2 and 3
+    assert metrics["human_intervention_count"] == 1
+
+
+def test_format_report_handles_zero_runs():
+    from src.evals import format_report
+
+    report = format_report({"total_runs": 0, "note": "No runs recorded yet."})
+    assert "No runs recorded" in report
+
+
+def test_format_report_renders_nonzero_metrics():
+    from src.evals import compute_trajectory_metrics, format_report
+
+    metrics = {
+        "total_runs": 2,
+        "answered_runs": 2,
+        "escalated_runs": 0,
+        "escalation_rate": 0.0,
+        "correct_count": 2,
+        "incorrect_count": 0,
+        "correctness_rate_among_answered": 1.0,
+        "runs_needing_retry": 0,
+        "retry_rate": 0.0,
+        "avg_attempts_per_run": 1.0,
+        "human_intervention_count": 0,
+        "human_intervention_rate": 0.0,
+    }
+    report = format_report(metrics)
+    assert "Total runs:               2" in report
+    assert "100.0%" in report
+
+
+# ---- Unit tests: attempts/human-intervention tracking (ADR-0009) --------
+
+def test_advance_step_records_attempts_used():
+    from src.nodes.advance_step import advance_step
+
+    state = {
+        "plan": ["How many Design courses?"],
+        "current_step_index": 0,
+        "step_results": [],
+        "sql_query": "SELECT COUNT(*) FROM course_listings",
+        "sql_result": [{"count": 1189}],
+        "generation_attempt": 3,
+    }
+    result = advance_step(state)
+
+    assert result["step_results"][0]["attempts_used"] == 3
+
+
+def test_capture_human_feedback_aggregates_attempts_and_intervention(tmp_path):
+    from src.feedback import capture_human_feedback
+
+    with patch("src.feedback.EVAL_LOG_PATH", tmp_path / "eval_log.jsonl"), patch(
+        "builtins.input", return_value="y"
+    ), patch("src.feedback.CorrectionStore"):
+        state = {
+            "question": "Compare Design and Health",
+            "step_results": [
+                {
+                    "sub_question": "Design?",
+                    "sql_query": "q1",
+                    "sql_result": [{"a": 1}],
+                    "source": "model",
+                    "attempts_used": 2,
+                },
+                {
+                    "sub_question": "Health?",
+                    "sql_query": "q2",
+                    "sql_result": [{"a": 2}],
+                    "source": "human",
+                    "attempts_used": 1,
+                },
+            ],
+        }
+        record = capture_human_feedback(state)
+
+    assert record["total_attempts"] == 3
+    assert record["human_intervention"] is True
+
+
+# ---- Unit tests: semantic critic (ADR-0011, Stage 3) ---------------------
+
+def test_semantic_critic_skips_when_disabled():
+    from src.nodes.semantic_critic import check_semantic_validity
+
+    with patch("src.nodes.semantic_critic.settings.semantic_critic_enabled", False), \
+            patch("ollama.chat") as mock_chat:
+        state = {"is_valid": True, "plan": ["q"], "current_step_index": 0}
+        result = check_semantic_validity(state)
+
+    mock_chat.assert_not_called()
+    assert result["is_valid"] is True
+
+
+def test_semantic_critic_skips_when_mechanically_already_invalid():
+    """No point spending an LLM call judging a query that already
+    failed mechanically (ADR-0011, Decision 1)."""
+    from src.nodes.semantic_critic import check_semantic_validity
+
+    with patch("ollama.chat") as mock_chat:
+        state = {
+            "is_valid": False,
+            "validation_reason": "Query error: no such table",
+            "plan": ["q"],
+            "current_step_index": 0,
+        }
+        result = check_semantic_validity(state)
+
+    mock_chat.assert_not_called()
+    assert result["is_valid"] is False
+
+
+def test_semantic_critic_keeps_valid_when_verdict_is_valid():
+    from src.nodes.semantic_critic import check_semantic_validity
+
+    with patch("src.nodes.semantic_critic._judge_result", return_value="VALID"):
+        state = {
+            "is_valid": True,
+            "plan": ["Which category has the highest average price?"],
+            "current_step_index": 0,
+            "sql_query": "SELECT category, AVG(price_usd) FROM course_listings GROUP BY category ORDER BY AVG(price_usd) DESC LIMIT 1",
+            "sql_result": [{"category": "Technology", "avg_price": 140.98}],
+        }
+        result = check_semantic_validity(state)
+
+    assert result["is_valid"] is True
+
+
+def test_semantic_critic_flags_wrong_direction_as_invalid():
+    """The exact failure class this stage exists to catch: a
+    mechanically valid query that answers the wrong question (MIN
+    instead of MAX for a 'highest' question)."""
+    from src.nodes.semantic_critic import check_semantic_validity
+
+    verdict = "INVALID: query used MIN instead of MAX, so it found the lowest price, not the highest"
+    with patch("src.nodes.semantic_critic._judge_result", return_value=verdict):
+        state = {
+            "is_valid": True,
+            "plan": ["Which category has the highest average price?"],
+            "current_step_index": 0,
+            "sql_query": "SELECT category, MIN(price_usd) FROM course_listings GROUP BY category ORDER BY MIN(price_usd) DESC LIMIT 1",
+            "sql_result": [{"category": "Health", "min_price": 10.0}],
+        }
+        result = check_semantic_validity(state)
+
+    assert result["is_valid"] is False
+    assert result["validation_reason"].startswith("Semantic critic:")
+    assert "MIN instead of MAX" in result["validation_reason"]
+
+
+def test_semantic_critic_falls_back_to_generic_reason_when_unparseable():
+    from src.nodes.semantic_critic import check_semantic_validity
+
+    with patch("src.nodes.semantic_critic._judge_result", return_value="INVALID"):
+        state = {
+            "is_valid": True,
+            "plan": ["q"],
+            "current_step_index": 0,
+            "sql_query": "SELECT 1",
+            "sql_result": [{"1": 1}],
+        }
+        result = check_semantic_validity(state)
+
+    assert result["is_valid"] is False
+    assert "flagged as not answering the question" in result["validation_reason"]
