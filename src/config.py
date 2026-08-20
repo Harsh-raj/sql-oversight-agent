@@ -15,6 +15,7 @@ class Settings:
     correction_collection: str = os.getenv(
         "CORRECTION_COLLECTION", "analyst_agent_corrections"
     )
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "all-minilm")
 
     # Lowered from 3 -> 2 (ADR-0002, Decision 5): fewer forced attempts,
     # bias toward honest escalation over a plausible-looking wrong answer.
@@ -24,11 +25,24 @@ class Settings:
     )
 
     # ADR-0002: reliability / oversight settings
-    node_timeout_seconds: float = float(os.getenv("NODE_TIMEOUT_SECONDS", "30"))
+    node_timeout_seconds: float = float(
+        os.getenv("NODE_TIMEOUT_SECONDS", "30"))
     run_timeout_seconds: float = float(os.getenv("RUN_TIMEOUT_SECONDS", "120"))
     clarification_enabled: bool = (
         os.getenv("CLARIFICATION_ENABLED", "true").lower() == "true"
     )
+    semantic_critic_enabled: bool = (
+        os.getenv("SEMANTIC_CRITIC_ENABLED", "true").lower() == "true"
+    )
+
+    # ADR-0009: Langfuse tracing — disabled by default, degrades silently
+    # if enabled but unreachable/misconfigured (never breaks a run).
+    langfuse_enabled: bool = os.getenv(
+        "LANGFUSE_ENABLED", "false").lower() == "true"
+    langfuse_public_key: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    langfuse_secret_key: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+    langfuse_host: str = os.getenv(
+        "LANGFUSE_HOST", "https://cloud.langfuse.com")
 
 
 settings = Settings()

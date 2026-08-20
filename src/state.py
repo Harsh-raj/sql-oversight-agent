@@ -13,8 +13,16 @@ class AgentState(TypedDict, total=False):
     # input
     question: str
 
+    # tracing (ADR-0009) — set once per run in main.py; None if tracing
+    # is disabled or Langfuse is unavailable
+    trace_id: Optional[str]
+
     # schema_tool output
     schema_context: str
+
+    # fast_path_check output (ADR-0007) — whether clarification/planning
+    # were skipped for an obviously simple question
+    fast_path: bool
 
     # clarification output (ADR-0002)
     clarification_needed: bool
@@ -51,9 +59,12 @@ class AgentState(TypedDict, total=False):
     is_valid: Optional[bool]
     validation_reason: Optional[str]
 
-    # escalation
+    # escalation (ADR-0006: real human-in-the-loop resolution)
     escalated: bool
     escalation_reason: Optional[str]
+    human_provided: bool
+    human_attempts: int
+    human_wants_to_retry: bool
 
     # responder output
     final_answer: Optional[str]

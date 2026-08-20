@@ -3,6 +3,7 @@ import re
 import ollama
 
 from src.config import settings
+from src.memory.correction_store import CorrectionStore
 from src.schema_utils import extract_table_names
 from src.state import AgentState
 
@@ -48,7 +49,8 @@ def _detect_bad_identifier(error: str):
 
     if "no such table" in error_lower:
         match = re.search(r"no such table:\s*(\S+)", error, re.IGNORECASE)
-        bad_table = match.group(1).strip(";") if match else "the table you used"
+        bad_table = match.group(1).strip(
+            ";") if match else "the table you used"
         return "table", bad_table
 
     if "no such column" in error_lower:
@@ -104,6 +106,33 @@ Write a corrected query.
 """
 
 
+def _format_memory_context(similar_corrections: list) -> str:
+    """
+    Formats retrieved past corrections as few-shot context. Only
+    corrections above the configured similarity threshold are included —
+    a low-similarity "match" is worse than no match, since it primes the
+    model with an irrelevant example (ADR-0008, Decision 4/consequence).
+    """
+    relevant = [
+        c
+        for c in similar_corrections
+        if c["score"] >= settings.retrieval_similarity_threshold
+    ]
+    if not relevant:
+        return ""
+
+    lines = [
+        "\nSimilar past question(s) where a human corrected the agent's "
+        "answer — use these as guidance if relevant:"
+    ]
+    for c in relevant:
+        lines.append(f'- Question: "{c["question"]}"')
+        if c.get("attempted_sql"):
+            lines.append(f"  Agent's incorrect attempt: {c['attempted_sql']}")
+        lines.append(f"  Correct approach: {c['human_correction']}")
+    return "\n".join(lines) + "\n"
+
+
 def generate_sql(state: AgentState) -> AgentState:
     """
     Generates a SQL query for the CURRENT plan step (ADR-0003) — not
@@ -136,6 +165,13 @@ def generate_sql(state: AgentState) -> AgentState:
 Overall question: {state['question']}
 Current sub-question to answer with one SQL query: {current_step}
 """
+
+    # Only query memory on the first attempt per step — the question
+    # doesn't change between retries, only the error feedback does
+    # (ADR-0008, Decision 4).
+    if attempt == 0:
+        similar = CorrectionStore().retrieve_similar(current_step)
+        user_prompt += _format_memory_context(similar)
 
     is_identifier_correction = False
     if attempt > 0 and state.get("sql_error"):

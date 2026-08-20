@@ -28,7 +28,8 @@ def execute_sql(state: AgentState) -> AgentState:
         conn = sqlite3.connect(settings.sqlite_db_path)
         cursor = conn.cursor()
         cursor.execute(sql)
-        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+        columns = [desc[0]
+                   for desc in cursor.description] if cursor.description else []
         rows = cursor.fetchall()
         conn.close()
 
