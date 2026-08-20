@@ -8,6 +8,10 @@ Kept as its own node — rather than logic inside the critic's routing
 function — because it needs to *mutate* state (append to step_results,
 advance the index), and LangGraph conditional-edge functions can only
 return a routing string, not modify state.
+
+Records `attempts_used` per step (ADR-0009) — needed to compute a real
+retry rate for trajectory evals; this data didn't exist anywhere
+previously.
 """
 
 from src.state import AgentState
@@ -20,6 +24,8 @@ def advance_step(state: AgentState) -> AgentState:
         "sub_question": current_step_question,
         "sql_query": state.get("sql_query"),
         "sql_result": state.get("sql_result"),
+        "source": "human" if state.get("human_provided") else "model",
+        "attempts_used": state.get("generation_attempt", 1),
     }
 
     step_results = state.get("step_results", []) + [step_record]
@@ -39,6 +45,9 @@ def advance_step(state: AgentState) -> AgentState:
         "is_valid": None,
         "validation_reason": None,
         "pending_correction": None,
+        "human_provided": False,
+        "human_attempts": 0,
+        "human_wants_to_retry": False,
     }
 
 

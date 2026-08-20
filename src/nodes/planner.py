@@ -9,6 +9,8 @@ this version, and why malformed planner output falls back to a safe
 single-step plan instead of retrying or crashing.
 """
 
+import re
+
 import ollama
 
 from src.config import settings
@@ -50,16 +52,35 @@ def _generate_plan_text(question: str, schema_context: str) -> str:
     return response["message"]["content"]
 
 
+_SQL_LEADING_PATTERN = re.compile(
+    r"^\s*(SELECT|WITH|INSERT|UPDATE|DELETE)\b", re.IGNORECASE)
+
+
+def _looks_like_sql(line: str) -> bool:
+    """
+    Detects a step that's actually a SQL statement instead of a
+    natural-language question — a real bug found in live testing: the
+    model sometimes leaks the query itself into the plan output instead
+    of describing what it answers. Treated the same as any other
+    malformed planner output (ADR-0003, Decision 3) — degrade to a safe
+    single-step plan rather than trusting it.
+    """
+    return bool(_SQL_LEADING_PATTERN.match(line))
+
+
 def _parse_plan(raw_text: str, fallback_question: str) -> list:
     steps = [
         line.strip()[2:].strip()
         for line in raw_text.splitlines()
         if line.strip().startswith("- ")
     ]
-    if not steps:
-        # Malformed planner output — degrade gracefully to a single-step
-        # plan rather than crashing or retrying the planning call itself
-        # (ADR-0003, Decision 3).
+    if not steps or any(_looks_like_sql(step) for step in steps):
+        # Malformed planner output — either no valid lines, or a step
+        # that's actually SQL rather than a question — degrade
+        # gracefully to a safe single-step plan rather than crashing or
+        # trusting output that would make the "Step N" display in the
+        # final answer show a query instead of a question (ADR-0003,
+        # Decision 3).
         return [fallback_question]
     return steps
 
