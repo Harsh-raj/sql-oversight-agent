@@ -60,6 +60,8 @@ def confirm_correction(state: AgentState) -> AgentState:
 
 
 def route_after_confirmation(state: AgentState) -> str:
-    """Routing function: "advance_step" if confirmed, "escalate" if the
-    developer rejected the correction."""
-    return "advance_step" if state.get("is_valid") else "escalate"
+    """Routing function: "semantic_critic" if confirmed (ADR-0011: a
+    confirmed correction still goes through semantic review before being
+    trusted, same as any other query), "escalate" if the developer
+    rejected the correction."""
+    return "semantic_critic" if state.get("is_valid") else "escalate"
